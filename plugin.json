@@ -1,7 +1,7 @@
 {
 	"name": "adb-plugin-reaction-roles",
 	"displayName": "Reaction Roles",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"description": "Manage reaction roles via slash commands with buttons, select menus, and emoji reactions.",
 	"author": "ADB",
 	"license": "AGPL-3.0-only",
@@ -37,5 +37,12 @@
 	"settings": {
 		"commandPermissions": true,
 		"schema": []
+	},
+	"dashboard": {
+		"permissions": [
+			{ "key": "view", "label": "View", "description": "See reaction role panels." },
+			{ "key": "configure", "label": "Configure", "description": "Change reaction roles settings." },
+			{ "key": "manage-panels", "label": "Manage panels", "description": "Create, edit, and delete reaction role panels and their role mappings." }
+		]
 	}
 }
