@@ -226,6 +226,15 @@ async function main() {
 	assert.ok(dropdownInteraction.deferred, "expected interaction to be deferred");
 	assert.deepStrictEqual(addedRoles, ["role-123"], "expected role-123 to be added");
 
+	const selectionModel = ctx.defineModel("selection", require("../models/selection"));
+	let selections = await selectionModel.find({ guildId: "test-guild" });
+	assert.strictEqual(selections.length, 1, "expected 1 selection doc after dropdown add");
+	assert.strictEqual(selections[0].userId, "member-456");
+	assert.strictEqual(selections[0].roleId, "role-123");
+	assert.strictEqual(selections[0].action, "add");
+	assert.strictEqual(selections[0].label, "Red Role");
+	assert.strictEqual(selections[0].messageId, "test-message-id");
+
 	// Change selection mode to single/button and test button click
 	const panelDoc = await reactionPanelModel.findOne({ guildId: "test-guild", messageId: "test-message-id" });
 	panelDoc.groups[0].type = "button";
@@ -259,6 +268,15 @@ async function main() {
 	assert.deepStrictEqual(addedRoles, ["role-123"], "expected role-123 to be added");
 	assert.deepStrictEqual(removedRoles, ["role-456"], "expected other role in group to be removed");
 
+	selections = await selectionModel.find({ guildId: "test-guild" });
+	const buttonAdds = selections.filter((s) => s.action === "add" && s.roleId === "role-123");
+	const buttonRemoves = selections.filter((s) => s.action === "remove");
+	assert.strictEqual(buttonAdds.length, 2, "expected dropdown + button adds for role-123");
+	assert.strictEqual(buttonRemoves.length, 1, "expected 1 remove selection from single-mode switch");
+	assert.strictEqual(buttonRemoves[0].roleId, "role-456");
+	assert.strictEqual(buttonRemoves[0].userId, "member-456");
+	assert.strictEqual(buttonRemoves[0].label, "Other");
+
 	// Test emoji reactions
 	console.log("Testing events: messageReactionAdd (emoji, multiple)");
 	panelDoc.groups[0].type = "emoji";
@@ -290,6 +308,32 @@ async function main() {
 
 	await emitEvent("messageReactionAdd", testReaction, testUser);
 	assert.deepStrictEqual(addedRoles, ["role-123"], "expected role-123 to be added on reaction");
+
+	const reactionAddSelections = await selectionModel.find({
+		guildId: "test-guild",
+		userId: "member-456",
+		action: "add",
+		roleId: "role-123",
+	});
+	assert.strictEqual(reactionAddSelections.length, 3, "expected reaction add to be recorded (dropdown, button, reaction)");
+	assert.strictEqual(reactionAddSelections[2].label, "Red Role");
+
+	console.log("Testing events: messageReactionRemove (emoji, multiple)");
+	testMember.roles.cache.has = (id) => id === "role-123";
+	removedRoles = [];
+
+	await emitEvent("messageReactionRemove", testReaction, testUser);
+	assert.deepStrictEqual(removedRoles, ["role-123"], "expected role-123 to be removed on reaction remove");
+
+	const reactionRemoveSelections = await selectionModel.find({
+		guildId: "test-guild",
+		action: "remove",
+		roleId: "role-123",
+	});
+	assert.strictEqual(reactionRemoveSelections.length, 1, "expected 1 remove selection for role-123");
+	assert.strictEqual(reactionRemoveSelections[0].userId, "member-456");
+	assert.strictEqual(reactionRemoveSelections[0].label, "Red Role");
+	assert.strictEqual(reactionRemoveSelections[0].messageId, "test-message-id");
 
 	console.log("Testing subcommand: list");
 	const listInt = createFakeInteraction({

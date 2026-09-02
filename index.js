@@ -1,6 +1,24 @@
 const { PermissionFlagsBits } = require("discord.js");
 const reactionroleCommand = require("./commands/reactionrole");
 const reactionPanelSchema = require("./models/reactionPanel");
+const selectionSchema = require("./models/selection");
+
+// Record one selection doc per role granted/removed (member page /me/self-roles).
+function recordSelection(Selection, guildId, userId, group, roleIds, action, messageId) {
+	const ids = Array.isArray(roleIds) ? roleIds : [roleIds];
+	return Promise.all(
+		ids.map((roleId) =>
+			Selection.create({
+				guildId,
+				userId,
+				roleId,
+				label: group ? (group.roles.find((r) => r.roleId === roleId) || {}).label || null : null,
+				action,
+				messageId: messageId || null,
+			})
+		)
+	);
+}
 
 /**
  * Every ADB plugin exports a single `load(ctx)` function. `ctx` is frozen
@@ -28,6 +46,7 @@ async function load(ctx) {
 			const groupName = parts[3];
 
 			const ReactionPanel = ctx.defineModel("reactionPanel", reactionPanelSchema);
+			const Selection = ctx.defineModel("selection", selectionSchema);
 			const panel = await ReactionPanel.findOne({ guildId: interaction.guildId, messageId });
 			if (!panel) return; // Panel config no longer exists in DB
 
@@ -64,15 +83,18 @@ async function load(ctx) {
 					const hasRole = member.roles.cache.has(roleId);
 					if (hasRole) {
 						await member.roles.remove(roleId);
+						await recordSelection(Selection, interaction.guildId, member.id, group, roleId, "remove", messageId);
 						await interaction.editReply({ content: `✅ Removed the role **${role.name}**.` });
 					} else {
 						await member.roles.add(roleId);
+						await recordSelection(Selection, interaction.guildId, member.id, group, roleId, "add", messageId);
 						await interaction.editReply({ content: `✅ Assigned the role **${role.name}**.` });
 					}
 				} else if (group.selectionMode === "single") {
 					const hasRole = member.roles.cache.has(roleId);
 					if (hasRole) {
 						await member.roles.remove(roleId);
+						await recordSelection(Selection, interaction.guildId, member.id, group, roleId, "remove", messageId);
 						await interaction.editReply({ content: `✅ Removed the role **${role.name}**.` });
 					} else {
 						// Remove other roles from the same group
@@ -80,8 +102,10 @@ async function load(ctx) {
 						const rolesToRemove = otherRoleIds.filter((id) => member.roles.cache.has(id));
 						if (rolesToRemove.length > 0) {
 							await member.roles.remove(rolesToRemove);
+							await recordSelection(Selection, interaction.guildId, member.id, group, rolesToRemove, "remove", messageId);
 						}
 						await member.roles.add(roleId);
+						await recordSelection(Selection, interaction.guildId, member.id, group, roleId, "add", messageId);
 						await interaction.editReply({
 							content: `✅ Assigned the role **${role.name}**${rolesToRemove.length > 0 ? " (and removed other roles from this group)" : ""}.`,
 						});
@@ -98,8 +122,10 @@ async function load(ctx) {
 						const rolesToRemove = otherRoleIds.filter((id) => member.roles.cache.has(id));
 						if (rolesToRemove.length > 0) {
 							await member.roles.remove(rolesToRemove);
+							await recordSelection(Selection, interaction.guildId, member.id, group, rolesToRemove, "remove", messageId);
 						}
 						await member.roles.add(roleId);
+						await recordSelection(Selection, interaction.guildId, member.id, group, roleId, "add", messageId);
 						await interaction.editReply({
 							content: `✅ Switched to the role **${role.name}**.`,
 						});
@@ -125,8 +151,14 @@ async function load(ctx) {
 						(id) => !selectedRoleIds.includes(id) && member.roles.cache.has(id)
 					);
 
-					if (rolesToRemove.length > 0) await member.roles.remove(rolesToRemove);
-					if (rolesToAdd.length > 0) await member.roles.add(rolesToAdd);
+					if (rolesToRemove.length > 0) {
+						await member.roles.remove(rolesToRemove);
+						await recordSelection(Selection, interaction.guildId, member.id, group, rolesToRemove, "remove", messageId);
+					}
+					if (rolesToAdd.length > 0) {
+						await member.roles.add(rolesToAdd);
+						await recordSelection(Selection, interaction.guildId, member.id, group, rolesToAdd, "add", messageId);
+					}
 
 					await interaction.editReply({
 						content: "✅ Your role selection has been updated.",
@@ -135,7 +167,10 @@ async function load(ctx) {
 					if (selectedRoleIds.length === 0) {
 						// Only possible in single mode (exclusive has minValues 1)
 						const rolesToRemove = groupRoleIds.filter((id) => member.roles.cache.has(id));
-						if (rolesToRemove.length > 0) await member.roles.remove(rolesToRemove);
+						if (rolesToRemove.length > 0) {
+							await member.roles.remove(rolesToRemove);
+							await recordSelection(Selection, interaction.guildId, member.id, group, rolesToRemove, "remove", messageId);
+						}
 						await interaction.editReply({
 							content: "✅ Removed roles from this group.",
 						});
@@ -145,8 +180,14 @@ async function load(ctx) {
 						const otherRoleIds = groupRoleIds.filter((id) => id !== targetRoleId);
 						const rolesToRemove = otherRoleIds.filter((id) => member.roles.cache.has(id));
 
-						if (rolesToRemove.length > 0) await member.roles.remove(rolesToRemove);
-						if (!member.roles.cache.has(targetRoleId)) await member.roles.add(targetRoleId);
+						if (rolesToRemove.length > 0) {
+							await member.roles.remove(rolesToRemove);
+							await recordSelection(Selection, interaction.guildId, member.id, group, rolesToRemove, "remove", messageId);
+						}
+						if (!member.roles.cache.has(targetRoleId)) {
+							await member.roles.add(targetRoleId);
+							await recordSelection(Selection, interaction.guildId, member.id, group, targetRoleId, "add", messageId);
+						}
 
 						await interaction.editReply({
 							content: `✅ Updated your role to **${role ? role.name : targetRoleId}**.`,
@@ -186,6 +227,7 @@ async function load(ctx) {
 			}
 
 			const ReactionPanel = ctx.defineModel("reactionPanel", reactionPanelSchema);
+			const Selection = ctx.defineModel("selection", selectionSchema);
 			const panel = await ReactionPanel.findOne({
 				guildId: reaction.message.guildId,
 				messageId: reaction.message.id,
@@ -230,6 +272,7 @@ async function load(ctx) {
 			if (foundGroup.selectionMode === "multiple") {
 				if (!member.roles.cache.has(role.id)) {
 					await member.roles.add(role.id);
+					await recordSelection(Selection, guild.id, member.id, foundGroup, role.id, "add", reaction.message.id);
 				}
 			} else if (foundGroup.selectionMode === "single" || foundGroup.selectionMode === "exclusive") {
 				// Remove other roles from this group
@@ -239,10 +282,12 @@ async function load(ctx) {
 
 				if (rolesToRemove.length > 0) {
 					await member.roles.remove(rolesToRemove);
+					await recordSelection(Selection, guild.id, member.id, foundGroup, rolesToRemove, "remove", reaction.message.id);
 				}
 
 				if (!member.roles.cache.has(role.id)) {
 					await member.roles.add(role.id);
+					await recordSelection(Selection, guild.id, member.id, foundGroup, role.id, "add", reaction.message.id);
 				}
 
 				// Remove user's reactions for other roles in this group
@@ -285,6 +330,7 @@ async function load(ctx) {
 			}
 
 			const ReactionPanel = ctx.defineModel("reactionPanel", reactionPanelSchema);
+			const Selection = ctx.defineModel("selection", selectionSchema);
 			const panel = await ReactionPanel.findOne({
 				guildId: reaction.message.guildId,
 				messageId: reaction.message.id,
@@ -339,6 +385,7 @@ async function load(ctx) {
 
 			if (member.roles.cache.has(role.id)) {
 				await member.roles.remove(role.id);
+				await recordSelection(Selection, guild.id, member.id, foundGroup, role.id, "remove", reaction.message.id);
 			}
 		} catch (err) {
 			ctx.logger.error("Error in messageReactionRemove event handler:", err);

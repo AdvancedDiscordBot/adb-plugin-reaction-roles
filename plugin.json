@@ -1,7 +1,7 @@
 {
 	"name": "adb-plugin-reaction-roles",
 	"displayName": "Reaction Roles",
-	"version": "1.2.0",
+	"version": "1.3.0",
 	"description": "Manage reaction roles via slash commands with buttons, select menus, and emoji reactions.",
 	"author": "ADB",
 	"license": "AGPL-3.0-only",
@@ -43,6 +43,30 @@
 			{ "key": "view", "label": "View", "description": "See reaction role panels." },
 			{ "key": "configure", "label": "Configure", "description": "Change reaction roles settings." },
 			{ "key": "manage-panels", "label": "Manage panels", "description": "Create, edit, and delete reaction role panels and their role mappings." }
+		]
+	},
+	"webUi": {
+		"memberPages": [
+			{
+				"path": "/me/self-roles",
+				"label": "My Self-Roles",
+				"icon": "Tags",
+				"source": {
+					"model": "selection",
+					"scope": "member",
+					"sort": { "createdAt": -1 },
+					"limit": 100
+				},
+				"view": {
+					"type": "table",
+					"columns": [
+						{ "field": "label", "label": "Role" },
+						{ "field": "action", "label": "Change" },
+						{ "field": "createdAt", "label": "When" }
+					],
+					"empty": "You haven't picked any roles in this server yet."
+				}
+			}
 		]
 	}
 }
