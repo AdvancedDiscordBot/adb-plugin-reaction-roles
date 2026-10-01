@@ -1,7 +1,7 @@
 {
 	"name": "adb-plugin-reaction-roles",
 	"displayName": "Reaction Roles",
-	"version": "1.3.0",
+	"version": "2.0.0",
 	"description": "Manage reaction roles via slash commands with buttons, select menus, and emoji reactions.",
 	"author": "ADB",
 	"license": "AGPL-3.0-only",
