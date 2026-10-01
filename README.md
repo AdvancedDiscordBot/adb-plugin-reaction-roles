@@ -6,9 +6,9 @@ Allows server administrators to create premium reaction role panels via slash co
 
 ## Features
 
-- **Multiple Selection Modes**: Supports single (max 1), multiple (no limit), and exclusive (must have exactly 1) selection modes per role group.
+- **Multiple Selection Modes**: Supports single (max 1), multiple (any options in the group), and exclusive (cannot deselect the last role) selection modes per role group.
 - **Modern Message Components**: Utilizes modern Discord buttons and dropdown select menus, as well as traditional emoji reactions.
-- **Grouping**: Group roles with labels and descriptions inside a single panel message (up to 5 groups/components per panel).
+- **Grouping**: Group roles with labels and descriptions inside a single panel message (up to 5 groups within Discord's action-row limits).
 - **Auto-recreation / Refresh**: Recreate or sync the panel message instantly using the `/reactionrole refresh` command.
 - **MongoDB Backend**: Persists panel configurations per guild.
 
@@ -19,6 +19,28 @@ Add it to your Advanced Discord Bot plugins:
 ```bash
 npm install adb-plugin-reaction-roles
 ```
+
+## Runtime trust
+
+This plugin declares `system:raw-client` in both `capabilities` and `permissions`
+and a persistent process, using the same explicit direct-loading contract as
+moderation. It needs live Discord.js guilds, members, messages, components and
+reaction events. Do not disable global plugin isolation to run it.
+
+Owner approval grants elevated host trust: execution in the bot's main process
+with raw client, host database and environment access. The narrower permission
+lists are not sandbox boundaries, and ADB's platform per-guild enable toggle does
+not apply to raw-client plugins. Only install code the bot owner trusts.
+
+Selections are checked against the persisted guild, channel, current message,
+group type and role options before role changes. Managed roles, `@everyone`, and
+roles at or above the bot's highest role cannot be selected or displaced.
+
+Panels support at most 5 groups and 5 action rows total. Each dropdown supports
+25 options; each button row holds 5 buttons. Messages support 20 emoji reactions.
+Discord's embed and 100-character component ID limits are validated before saving
+panel additions. Group names cannot contain colons. Refreshing a deleted panel
+rebuilds its components with the replacement message ID.
 
 ## Slash Commands
 
