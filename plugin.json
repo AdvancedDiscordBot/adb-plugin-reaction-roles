@@ -6,22 +6,25 @@
 	"author": "ADB",
 	"license": "AGPL-3.0-only",
 	"main": "index.js",
-	"requiresRestart": false,
+	"requiresRestart": true,
+	"isolation": false,
 	"manifestVersion": 2,
 	"process": {
-		"model": "pooled",
-		"maxExecutionMs": 5000,
-		"memoryMb": 128,
-		"persistentReason": null
+		"model": "persistent",
+		"maxExecutionMs": 15000,
+		"memoryMb": 256,
+		"persistentReason": "Runs un-isolated (system:raw-client) for live guild/member role and hierarchy checks, panel message/component editing, and emoji reaction events and management. These Discord.js objects and operations are not available through the serialized worker RPC surface. Requires owner-approved full host trust."
 	},
 	"capabilities": {
+		"system": ["raw-client"],
 		"storage": ["own-collection"],
-		"discord": ["SendMessages", "ManageRoles", "ManageMessages", "AddReactions", "GuildInfo"],
+		"discord": ["SendMessages", "EmbedLinks", "ReadMessageHistory", "ManageRoles", "ManageMessages", "AddReactions", "GuildInfo"],
 		"hooks": ["subscribe"]
 	},
 	"permissions": {
+		"system": ["raw-client"],
 		"storage": ["own-collection"],
-		"discord": ["SendMessages", "ManageRoles", "ManageMessages", "AddReactions", "GuildInfo"],
+		"discord": ["SendMessages", "EmbedLinks", "ReadMessageHistory", "ManageRoles", "ManageMessages", "AddReactions", "GuildInfo"],
 		"hooks": ["subscribe"],
 		"network": { "outbound": [] },
 		"filesystem": { "read": [], "write": [] },
@@ -29,7 +32,7 @@
 		"nativeAddons": false
 	},
 	"declaredDependencies": [],
-	"discordPermissions": ["SendMessages", "ManageRoles", "ManageMessages", "AddReactions"],
+	"discordPermissions": ["SendMessages", "EmbedLinks", "ReadMessageHistory", "ManageRoles", "ManageMessages", "AddReactions"],
 	"engines": {
 		"core": ">=2.0.0",
 		"plugins": { "administration": ">=2.0.0" }
