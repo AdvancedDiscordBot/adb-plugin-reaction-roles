@@ -1,7 +1,7 @@
 {
   "name": "adb-plugin-reaction-roles",
   "version": "2.0.0",
-  "description": "One-line description of what this plugin does.",
+  "description": "Self-assignable roles for ADB via emoji reactions, buttons or select menus, with single, multiple or exclusive modes.",
   "main": "index.js",
   "files": [
     "index.js",
