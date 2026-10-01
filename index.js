@@ -3,6 +3,10 @@ const reactionroleCommand = require("./commands/reactionrole");
 const reactionPanelSchema = require("./models/reactionPanel");
 const selectionSchema = require("./models/selection");
 
+function canManageRole(role, guild, botMember) {
+	return role && role.id !== guild.id && !role.managed && role.position < botMember.roles.highest.position;
+}
+
 // Record one selection doc per role granted/removed (member page /me/self-roles).
 function recordSelection(Selection, guildId, userId, group, roleIds, action, messageId) {
 	const ids = Array.isArray(roleIds) ? roleIds : [roleIds];
@@ -26,10 +30,14 @@ function recordSelection(Selection, guildId, userId, group, roleIds, action, mes
  */
 async function load(ctx) {
 	// --- Register slash command -----------------------------------------
-	ctx.registerCommand(reactionroleCommand);
+	ctx.registerCommand({
+		data: reactionroleCommand.data,
+		execute: (interaction) => reactionroleCommand.execute(interaction, ctx),
+	});
 
 	// --- Define namespaced DB model -----------------------------------------
-	ctx.defineModel("reactionPanel", reactionPanelSchema);
+	const ReactionPanel = ctx.defineModel("reactionPanel", reactionPanelSchema);
+	const Selection = ctx.defineModel("selection", selectionSchema);
 
 	// --- Component Interaction Handler (Buttons and Select Menus) ------------
 	ctx.registerEvent("interactionCreate", async (interaction) => {
@@ -45,15 +53,27 @@ async function load(ctx) {
 			const messageId = parts[2];
 			const groupName = parts[3];
 
-			const ReactionPanel = ctx.defineModel("reactionPanel", reactionPanelSchema);
-			const Selection = ctx.defineModel("selection", selectionSchema);
-			const panel = await ReactionPanel.findOne({ guildId: interaction.guildId, messageId });
-			if (!panel) return; // Panel config no longer exists in DB
+			await interaction.deferReply({ ephemeral: true });
+			const expectedType = interaction.isButton() ? "button" : "dropdown";
+			if (!interaction.guild || !interaction.guildId || type !== expectedType ||
+				parts.length !== (type === "button" ? 5 : 4) || messageId !== interaction.message?.id) {
+				return interaction.editReply({ content: "This role panel is invalid or out of date." });
+			}
+			const panel = await ReactionPanel.findOne({ guildId: interaction.guildId, channelId: interaction.channelId, messageId });
+			if (!panel) return interaction.editReply({ content: "This role panel no longer exists." });
 
 			const group = panel.groups.find((g) => g.name === groupName);
-			if (!group) return;
-
-			await interaction.deferReply({ ephemeral: true });
+			if (!group || group.type !== type) {
+				return interaction.editReply({ content: "This role group is invalid or out of date." });
+			}
+			const selectedRoleIds = type === "button" ? [parts[4]] : interaction.values;
+			if (!Array.isArray(selectedRoleIds) || new Set(selectedRoleIds).size !== selectedRoleIds.length ||
+				selectedRoleIds.some((id) => !group.roles.some((r) => r.roleId === id)) ||
+				!["single", "multiple", "exclusive"].includes(group.selectionMode) ||
+				(group.selectionMode !== "multiple" && selectedRoleIds.length > 1) ||
+				(group.selectionMode === "exclusive" && selectedRoleIds.length === 0)) {
+				return interaction.editReply({ content: "That selection is not allowed by this role group." });
+			}
 
 			const botMember = await interaction.guild.members.fetchMe();
 			if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
@@ -62,7 +82,19 @@ async function load(ctx) {
 				});
 			}
 
-			const member = interaction.member;
+			const member = await interaction.guild.members.fetch(interaction.user.id);
+			// Validate both selected and displaced roles before the first mutation.
+			const affectedRoleIds = new Set(selectedRoleIds);
+			if (type === "dropdown" || group.selectionMode !== "multiple") {
+				for (const r of group.roles) {
+					if (member.roles.cache.has(r.roleId)) affectedRoleIds.add(r.roleId);
+				}
+			}
+			for (const id of affectedRoleIds) {
+				if (!canManageRole(interaction.guild.roles.cache.get(id), interaction.guild, botMember)) {
+					return interaction.editReply({ content: "I cannot manage a selected or existing role in this group. Check for deleted, managed, or higher roles." });
+				}
+			}
 
 			if (interaction.isButton()) {
 				const roleId = parts[4];
@@ -70,12 +102,6 @@ async function load(ctx) {
 				if (!role) {
 					return interaction.editReply({
 						content: "❌ That role no longer exists in this server.",
-					});
-				}
-
-				if (role.position >= botMember.roles.highest.position) {
-					return interaction.editReply({
-						content: `❌ I cannot manage the role **${role.name}** because it is higher than or equal to my highest role.`,
 					});
 				}
 
@@ -132,18 +158,7 @@ async function load(ctx) {
 					}
 				}
 			} else if (interaction.isStringSelectMenu()) {
-				const selectedRoleIds = interaction.values || [];
 				const groupRoleIds = group.roles.map((r) => r.roleId);
-
-				// Verify hierarchy permissions for all roles in group
-				for (const id of groupRoleIds) {
-					const role = interaction.guild.roles.cache.get(id);
-					if (role && role.position >= botMember.roles.highest.position) {
-						return interaction.editReply({
-							content: `❌ I cannot manage the role **${role.name}** because it is higher than or equal to my highest role.`,
-						});
-					}
-				}
 
 				if (group.selectionMode === "multiple") {
 					const rolesToAdd = selectedRoleIds.filter((id) => !member.roles.cache.has(id));
@@ -151,13 +166,15 @@ async function load(ctx) {
 						(id) => !selectedRoleIds.includes(id) && member.roles.cache.has(id)
 					);
 
-					if (rolesToRemove.length > 0) {
-						await member.roles.remove(rolesToRemove);
-						await recordSelection(Selection, interaction.guildId, member.id, group, rolesToRemove, "remove", messageId);
+					// Bulk add/remove rebuilds the member's roles from a gateway cache
+					// that REST mutations do not update. Use role-specific endpoints.
+					for (const roleId of rolesToRemove) {
+						await member.roles.remove(roleId);
+						await recordSelection(Selection, interaction.guildId, member.id, group, roleId, "remove", messageId);
 					}
-					if (rolesToAdd.length > 0) {
-						await member.roles.add(rolesToAdd);
-						await recordSelection(Selection, interaction.guildId, member.id, group, rolesToAdd, "add", messageId);
+					for (const roleId of rolesToAdd) {
+						await member.roles.add(roleId);
+						await recordSelection(Selection, interaction.guildId, member.id, group, roleId, "add", messageId);
 					}
 
 					await interaction.editReply({
@@ -215,7 +232,7 @@ async function load(ctx) {
 	// --- Emoji Reaction Add Handler -----------------------------------------
 	ctx.registerEvent("messageReactionAdd", async (reaction, user) => {
 		try {
-			if (user.bot) return;
+			if (user.bot || !reaction.message.guildId) return;
 
 			if (reaction.partial) {
 				try {
@@ -226,10 +243,9 @@ async function load(ctx) {
 				}
 			}
 
-			const ReactionPanel = ctx.defineModel("reactionPanel", reactionPanelSchema);
-			const Selection = ctx.defineModel("selection", selectionSchema);
 			const panel = await ReactionPanel.findOne({
 				guildId: reaction.message.guildId,
+				channelId: reaction.message.channelId,
 				messageId: reaction.message.id,
 			});
 			if (!panel) return;
@@ -267,7 +283,7 @@ async function load(ctx) {
 			if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) return;
 
 			const role = guild.roles.cache.get(foundRole.roleId);
-			if (!role || role.position >= botMember.roles.highest.position) return;
+			if (!canManageRole(role, guild, botMember)) return;
 
 			if (foundGroup.selectionMode === "multiple") {
 				if (!member.roles.cache.has(role.id)) {
@@ -279,6 +295,7 @@ async function load(ctx) {
 				const otherRoles = foundGroup.roles.filter((r) => r.roleId !== foundRole.roleId);
 				const otherRoleIds = otherRoles.map((r) => r.roleId);
 				const rolesToRemove = otherRoleIds.filter((id) => member.roles.cache.has(id));
+				if (rolesToRemove.some((id) => !canManageRole(guild.roles.cache.get(id), guild, botMember))) return;
 
 				if (rolesToRemove.length > 0) {
 					await member.roles.remove(rolesToRemove);
@@ -318,7 +335,7 @@ async function load(ctx) {
 	// --- Emoji Reaction Remove Handler -----------------------------------------
 	ctx.registerEvent("messageReactionRemove", async (reaction, user) => {
 		try {
-			if (user.bot) return;
+			if (user.bot || !reaction.message.guildId) return;
 
 			if (reaction.partial) {
 				try {
@@ -329,10 +346,9 @@ async function load(ctx) {
 				}
 			}
 
-			const ReactionPanel = ctx.defineModel("reactionPanel", reactionPanelSchema);
-			const Selection = ctx.defineModel("selection", selectionSchema);
 			const panel = await ReactionPanel.findOne({
 				guildId: reaction.message.guildId,
+				channelId: reaction.message.channelId,
 				messageId: reaction.message.id,
 			});
 			if (!panel) return;
@@ -364,11 +380,11 @@ async function load(ctx) {
 
 			if (foundGroup.selectionMode === "exclusive") {
 				// Exclusive roles cannot be toggled off by removing the reaction.
-				// Keep the role, and put the reaction back.
+				// Keep the role and ensure the bot's reaction remains available.
 				const guild = reaction.message.guild;
 				const member = await guild.members.fetch(user.id).catch(() => null);
 				if (member && member.roles.cache.has(foundRole.roleId)) {
-					await reaction.react().catch(() => null);
+					await reaction.message.react(reaction.emoji.id || reaction.emoji.name).catch(() => null);
 				}
 				return;
 			}
@@ -381,7 +397,7 @@ async function load(ctx) {
 			if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) return;
 
 			const role = guild.roles.cache.get(foundRole.roleId);
-			if (!role || role.position >= botMember.roles.highest.position) return;
+			if (!canManageRole(role, guild, botMember)) return;
 
 			if (member.roles.cache.has(role.id)) {
 				await member.roles.remove(role.id);

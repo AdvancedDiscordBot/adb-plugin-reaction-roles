@@ -21,6 +21,22 @@ function parseEmoji(emojiStr) {
 
 // Build the Discord message payload (embed + components) for a reaction role panel
 function buildPanelMessage(panel, guild) {
+	if (panel.groups.length > 5) throw new Error("A panel can have a maximum of 5 groups.");
+	let reactionCount = 0;
+	for (const group of panel.groups) {
+		const customId = group.type === "button"
+			? `reactionrole:button:${panel.messageId}:${group.name}:${"0".repeat(20)}`
+			: `reactionrole:dropdown:${panel.messageId}:${group.name}`;
+		if (!group.name || group.name.includes(":") || customId.length > 100) {
+			throw new Error("Group names must be nonempty, contain no colons, and fit Discord's 100-character component ID limit.");
+		}
+		if (group.type === "dropdown" && group.roles.length > 25) {
+			throw new Error("A dropdown can have a maximum of 25 role options.");
+		}
+		if (group.type === "emoji") reactionCount += group.roles.length;
+	}
+	if (reactionCount > 20) throw new Error("A message can have a maximum of 20 emoji reactions.");
+
 	const embed = new EmbedBuilder()
 		.setTitle(panel.title)
 		.setDescription(panel.description || null)
@@ -118,6 +134,13 @@ function buildPanelMessage(panel, guild) {
 		}
 	}
 
+	if (components.length > 5) throw new Error("A panel can have a maximum of 5 action rows (5 buttons per row or 1 dropdown per row).");
+	// Validate before persisting a panel, not after Discord rejects its message.
+	const json = embed.toJSON();
+	const embedLength = (json.title || "").length + (json.description || "").length +
+		(json.footer?.text || "").length + (json.fields || []).reduce((sum, field) => sum + field.name.length + field.value.length, 0);
+	if (embedLength > 6000) throw new Error("Panel embed text must not exceed 6000 characters.");
+	for (const row of components) row.toJSON();
 	return { embeds: [embed], components };
 }
 
@@ -338,7 +361,7 @@ module.exports = {
 
 	execute: async (interaction, ctx) => {
 		// Ensure member has permission
-		if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) {
+		if (!interaction.guildId || !interaction.member?.permissions?.has?.(PermissionFlagsBits.ManageGuild)) {
 			return interaction.reply({
 				content: "❌ You need the **Manage Server** permission to use this command.",
 				ephemeral: true,
@@ -368,11 +391,20 @@ module.exports = {
 					content: "❌ Invalid hex color format. Use e.g. `#5865F2`.",
 				});
 			}
+			const groupData = { name: groupName, label: groupLabel, type, selectionMode, roles: [] };
+			try {
+				buildPanelMessage({ title, description, color, groups: [groupData], messageId: "0".repeat(20) }, interaction.guild);
+			} catch (err) {
+				return interaction.editReply({ content: `Invalid panel: ${err.message}` });
+			}
+			if (!channel || typeof channel.send !== "function" || channel.isTextBased?.() === false) {
+				return interaction.editReply({ content: "Select a text-based channel for the panel." });
+			}
 
 			// Validate channel permissions
 			const botMember = await interaction.guild.members.fetchMe();
 			const channelPerms = channel.permissionsFor(botMember);
-			if (!channelPerms.has([PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
+			if (!channelPerms?.has([PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) {
 				return interaction.editReply({
 					content: `❌ I do not have permission to send messages and embeds in <#${channel.id}>.`,
 				});
@@ -404,15 +436,7 @@ module.exports = {
 				title,
 				description,
 				color: color || "#5865F2",
-				groups: [
-					{
-						name: groupName,
-						label: groupLabel,
-						type,
-						selectionMode,
-						roles: [],
-					},
-				],
+				groups: [groupData],
 			});
 
 			// Build and edit real panel message
@@ -451,24 +475,26 @@ module.exports = {
 			if (groupName) {
 				group = panel.groups.find((g) => g.name === groupName);
 				if (!group) {
-					group = {
+					panel.groups.push({
 						name: groupName,
 						label: groupLabel || groupName,
 						type: groupType || "dropdown",
 						selectionMode: groupMode || "multiple",
 						roles: [],
-					};
-					panel.groups.push(group);
+					});
+					// Mongoose casts pushed subdocuments into new objects.
+					group = panel.groups[panel.groups.length - 1];
 				}
 			} else {
 				// Default to first group
 				group = panel.groups[0];
+				if (!group) {
+					panel.groups.push({ name: "default", label: "Select Roles", type: "dropdown", selectionMode: "multiple", roles: [] });
+					group = panel.groups[0];
+				}
 			}
 
-			// Check limit: maximum 5 groups (since max 5 action rows in Discord)
-			// Wait, count the groups that actually have roles or will have component layouts.
-			// Let's just limit the list of groups in DB to 5 to be extremely safe.
-			if (panel.groups.length > 5 && !panel.groups.some((g) => g.name === groupName)) {
+			if (panel.groups.length > 5) {
 				return interaction.editReply({
 					content: "❌ A panel can have a maximum of 5 groups due to Discord UI limits.",
 				});
@@ -524,9 +550,10 @@ module.exports = {
 
 			// Check bot role hierarchy
 			const botMember = await interaction.guild.members.fetchMe();
-			if (role.position >= botMember.roles.highest.position) {
+			if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles) || role.managed || role.id === interaction.guildId ||
+				!(role.position < botMember.roles.highest.position)) {
 				return interaction.editReply({
-					content: `❌ I cannot assign/remove the role **${role.name}** because it is higher than or equal to my highest role in the server hierarchy. Please move my role higher.`,
+					content: `I cannot assign/remove **${role.name}**. Check Manage Roles permission, role hierarchy, and whether the role is managed or @everyone.`,
 				});
 			}
 
@@ -538,7 +565,13 @@ module.exports = {
 				description: description || null,
 			});
 
-			// Save to database
+			let payload;
+			try {
+				payload = buildPanelMessage(panel, interaction.guild);
+			} catch (err) {
+				return interaction.editReply({ content: `Invalid panel: ${err.message}` });
+			}
+			// Save only after validating all embed and component limits.
 			await panel.save();
 
 			// Edit discord message
@@ -556,7 +589,6 @@ module.exports = {
 				});
 			}
 
-			const payload = buildPanelMessage(panel, interaction.guild);
 			await message.edit(payload);
 
 			// Add reactions if group is emoji type
@@ -713,14 +745,22 @@ module.exports = {
 				});
 			}
 
-			let message = await channel.messages.fetch(panel.messageId).catch(() => null);
+			let message = await channel.messages.fetch(panel.messageId).catch((err) => {
+				if (err.code === 10008) return null; // Unknown Message, not a transient failure.
+				throw err;
+			});
 			let recreated = false;
 
-			const payload = buildPanelMessage(panel, interaction.guild);
+			let payload;
+			try {
+				payload = buildPanelMessage(panel, interaction.guild);
+			} catch (err) {
+				return interaction.editReply({ content: `Invalid panel: ${err.message}` });
+			}
 
 			if (!message) {
 				// Recreate panel message if deleted
-				message = await channel.send(payload).catch((err) => {
+				message = await channel.send({ embeds: payload.embeds }).catch((err) => {
 					ctx.logger.error("Failed to recreate panel message:", err);
 					return null;
 				});
@@ -732,9 +772,9 @@ module.exports = {
 				}
 
 				// Update database with new message ID
-				const oldId = panel.messageId;
 				panel.messageId = message.id;
-				await ReactionPanel.updateOne({ messageId: oldId }, { $set: { messageId: message.id } });
+				await message.edit(buildPanelMessage(panel, interaction.guild));
+				await ReactionPanel.updateOne({ _id: panel._id, guildId: interaction.guildId }, { $set: { messageId: message.id } });
 				recreated = true;
 			} else {
 				await message.edit(payload);

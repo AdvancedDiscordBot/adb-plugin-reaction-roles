@@ -1,5 +1,8 @@
 "use strict";
 
+const { EventEmitter } = require("node:events");
+const { Mongoose } = require("mongoose");
+
 /**
  * mock-ctx.js — a bot-faithful, in-memory stand-in for the real ADB
  * PluginContext (core/PluginContext.js) + HookBus (core/HookBus.js) +
@@ -35,6 +38,8 @@
 function createFakeModel(fullName, schema) {
 	const store = [];
 	let idCounter = 1;
+	const DocumentModel = new Mongoose().model(fullName, schema);
+	const nextId = () => (idCounter++).toString(16).padStart(24, "0");
 
 	// Extract simple `default` values from the schema definition (schema.obj).
 	const defaults = {};
@@ -103,11 +108,17 @@ function createFakeModel(fullName, schema) {
 		return builder;
 	}
 
-	function wrapDoc(doc) {
-		// Give each stored doc a save() like a mongoose document.
+	function wrapDoc(data) {
+		// Use real casting (especially DocumentArrays) and detached reads. Only
+		// save() persists changes; no database connection is opened.
+		const doc = new DocumentModel(data);
 		Object.defineProperty(doc, "save", {
 			value: async function () {
-				if (!store.includes(doc)) store.push(doc);
+				await doc.validate();
+				const snapshot = doc.toObject();
+				const idx = store.findIndex((d) => String(d._id) === String(doc._id));
+				if (idx < 0) store.push(snapshot);
+				else store[idx] = snapshot;
 				return doc;
 			},
 			enumerable: false,
@@ -118,28 +129,31 @@ function createFakeModel(fullName, schema) {
 	const model = {
 		modelName: fullName,
 		find(q = {}) {
-			return query(() => store.filter((d) => matches(d, q)));
+			return query(() => store.filter((d) => matches(d, q)).map(wrapDoc));
 		},
 		findOne(q = {}) {
-			return query(() => store.find((d) => matches(d, q)) || null);
+			return query(() => {
+				const doc = store.find((d) => matches(d, q));
+				return doc ? wrapDoc(doc) : null;
+			});
 		},
 		findById(id) {
-			return query(() => store.find((d) => String(d._id) === String(id)) || null);
+			return model.findOne({ _id: id });
 		},
 		async findOneAndUpdate(q = {}, update = {}, opts = {}) {
 			let doc = store.find((d) => matches(d, q));
 			if (!doc && opts.upsert) {
-				doc = wrapDoc(applyDefaults({ _id: idCounter++, ...q }));
+				doc = applyDefaults({ _id: nextId(), ...q });
 				store.push(doc);
 			}
 			if (!doc) return null;
 			applyUpdate(doc, update);
-			return opts.new === false ? doc : doc;
+			return wrapDoc(doc);
 		},
 		async updateOne(q = {}, update = {}, opts = {}) {
 			let doc = store.find((d) => matches(d, q));
 			if (!doc && opts.upsert) {
-				doc = wrapDoc(applyDefaults({ _id: idCounter++, ...q }));
+				doc = applyDefaults({ _id: nextId(), ...q });
 				store.push(doc);
 			}
 			if (doc) applyUpdate(doc, update);
@@ -151,9 +165,7 @@ function createFakeModel(fullName, schema) {
 			return { acknowledged: true, modifiedCount: docs.length };
 		},
 		async create(doc) {
-			const entry = wrapDoc(applyDefaults({ _id: idCounter++, ...doc }));
-			store.push(entry);
-			return entry;
+			return wrapDoc(applyDefaults({ _id: nextId(), ...doc })).save();
 		},
 		async deleteOne(q = {}) {
 			const idx = store.findIndex((d) => matches(d, q));
@@ -173,7 +185,7 @@ function createFakeModel(fullName, schema) {
 		// constructor-style: new Model(doc) then doc.save()
 		// exposed as .build() to avoid needing `new`
 		build(doc) {
-			return wrapDoc({ _id: idCounter++, ...doc });
+			return wrapDoc({ _id: nextId(), ...doc });
 		},
 		_store: store,
 	};
@@ -211,6 +223,7 @@ function createMockCtx({ pluginName = "adb-plugin-REPLACE_ME" } = {}) {
 	const registeredCommands = new Map();
 	const registeredEvents = new Map();
 	const models = new Map();
+	const eventResults = [];
 
 	// --- HookBus mirror ---
 	const handlers = new Map();
@@ -272,30 +285,28 @@ function createMockCtx({ pluginName = "adb-plugin-REPLACE_ME" } = {}) {
 			if (!pluginConfigs.has(key)) {
 				pluginConfigs.set(key, { guildId, pluginName: pName, data: {} });
 			}
-			return pluginConfigs.get(key);
+			return JSON.parse(JSON.stringify(pluginConfigs.get(key)));
 		},
 		async updatePluginConfig(guildId, pName, data) {
 			const key = `${guildId}:${pName}`;
 			// real bot does $set: { data } — a full replace of `data`
-			const config = { guildId, pluginName: pName, data };
+			const config = { guildId, pluginName: pName, data: JSON.parse(JSON.stringify(data)) };
 			pluginConfigs.set(key, config);
-			return config;
+			return JSON.parse(JSON.stringify(config));
 		},
 		async getAllPluginConfigs(guildId) {
-			return [...pluginConfigs.values()].filter((c) => c.guildId === guildId);
+			return JSON.parse(JSON.stringify([...pluginConfigs.values()].filter((c) => c.guildId === guildId)));
 		},
 	};
 
 	// --- Fake discord.js client ---
 	const clientCommands = new Map();
-	const client = {
+	const client = Object.assign(new EventEmitter(), {
 		commands: clientCommands,
 		guilds: { cache: new Map() },
 		channels: { fetch: async () => null, cache: new Map() },
 		user: { id: "mock-bot-id" },
-		once: () => {},
-		on: () => {},
-	};
+	});
 
 	// --- ctx methods (bot-faithful) ---
 	function registerCommand(command) {
@@ -313,6 +324,11 @@ function createMockCtx({ pluginName = "adb-plugin-REPLACE_ME" } = {}) {
 	function registerEvent(name, handler, options = {}) {
 		if (!registeredEvents.has(name)) registeredEvents.set(name, []);
 		registeredEvents.get(name).push({ handler, options });
+		client[options.once ? "once" : "on"](name, (...args) => {
+			const result = handler(...args, client);
+			eventResults.push(Promise.resolve(result));
+			return result;
+		});
 	}
 	function defineModel(modelName, schema) {
 		const fullName = `plugin_${pluginName}_${modelName}`;
@@ -332,7 +348,7 @@ function createMockCtx({ pluginName = "adb-plugin-REPLACE_ME" } = {}) {
 		defineModel,
 		models: null, // writable, like the real ctx
 		hooks,
-		config: { env: process.env },
+		config: { env: {} },
 		logger,
 	};
 	Object.keys(ctx).forEach((k) => {
@@ -345,9 +361,8 @@ function createMockCtx({ pluginName = "adb-plugin-REPLACE_ME" } = {}) {
 
 	// --- test helper: trigger a registered event ---
 	async function emitEvent(name, ...args) {
-		for (const { handler } of registeredEvents.get(name) || []) {
-			await handler(...args, client);
-		}
+		client.emit(name, ...args);
+		await Promise.all(eventResults.splice(0));
 	}
 
 	return {
